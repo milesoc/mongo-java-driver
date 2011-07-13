@@ -83,12 +83,6 @@
 
   <target name="jar" depends="compile" description="Create driver jar">
 
-    <exec executable="git" output="build/main/git-hash">
-      <arg value="log" />
-      <arg value="--pretty=format:%H" />
-      <arg value="-1" />
-    </exec>
-
     <jar jarfile="mongo.jar" manifest="src/main/META-INF/MANIFEST.MF" >
       <fileset dir="build/main" />
     </jar>

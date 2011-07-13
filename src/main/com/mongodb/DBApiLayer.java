@@ -105,6 +105,10 @@ public class DBApiLayer extends DB {
     }
 
     protected MyCollection doGetCollection( String name ){
+        return doGetCollectionWithDBCommandOnCreation(name, null);
+    }
+
+    protected MyCollection doGetCollectionWithDBCommandOnCreation(String name, DBObject cmd) {
         MyCollection c = _collections.get( name );
         if ( c != null )
             return c;
@@ -116,6 +120,9 @@ public class DBApiLayer extends DB {
 
             c = new MyCollection( name );
             _collections.put( name , c );
+            if ( cmd != null ) {
+                command(cmd);
+            }
         }
 
         return c;

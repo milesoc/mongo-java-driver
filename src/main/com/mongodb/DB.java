@@ -75,6 +75,33 @@ public abstract class DB {
     }
 
     /**
+     * Gets a collection with a given name.
+     * If the collection does not exist, a new collection is created, and the specified command is run against it.
+     * @param name the name of the collection to return
+     * @param cmd the command to run against a newly created collection
+     * @return the collection
+     */
+    protected abstract DBCollection doGetCollectionWithDBCommandOnCreation( String name, DBObject cmd );
+
+    /**
+     * Gets a collection with a given name.
+     * If the collection does not exist, a new collection is created, and the specified command is run against it.
+     * @param name the name of the collection to return
+     * @param cmd the command to run against a newly created collection
+     * @return the collection
+     */
+    public final DBCollection getCollectionWithDBCommandOnCreation( String name, DBObject cmd ){
+        DBCollection c = doGetCollectionWithDBCommandOnCreation( name, cmd );
+        return c;
+    }
+
+    public final DBCollection getShardedCollection( String name ){
+        DBObject cmd = new BasicDBObject( "shardcollection", name );
+        cmd.put( "key", new BasicDBObject( "_id", new Integer( 1 ) ) );
+        return getCollectionWithDBCommandOnCreation( name, cmd );
+    }
+
+    /**
      * Creates a collection with a given name and options.
      * If the collection does not exist, a new collection is created.
      * Note that if the options parameter is null, the creation will be deferred to when the collection is written to.

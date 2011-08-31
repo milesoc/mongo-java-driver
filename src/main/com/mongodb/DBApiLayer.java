@@ -46,7 +46,7 @@ public class DBApiLayer extends DB {
     /** The maximum number of cursors allowed */
     static final int NUM_CURSORS_BEFORE_KILL = 100;
     static final int NUM_CURSORS_PER_BATCH = 20000;
-    
+
     //  --- show
 
     static final Logger TRACE_LOGGER = Logger.getLogger( "com.mongodb.TRACE" );
@@ -55,7 +55,7 @@ public class DBApiLayer extends DB {
     static final boolean willTrace(){
         return TRACE_LOGGER.isLoggable( TRACE_LEVEL );
     }
-    
+
     static final void trace( String s ){
         TRACE_LOGGER.log( TRACE_LEVEL , s );
     }
@@ -89,7 +89,7 @@ public class DBApiLayer extends DB {
 
         if ( connector == null )
             throw new IllegalArgumentException( "need a connector: " + name );
-        
+
         _root = name;
         _rootPlusDot = _root + ".";
 
@@ -103,7 +103,7 @@ public class DBApiLayer extends DB {
     public void requestDone(){
         _connector.requestDone();
     }
-    
+
     public void requestEnsureConnection(){
         _connector.requestEnsureConnection();
     }
@@ -151,7 +151,7 @@ public class DBApiLayer extends DB {
             }
             x.add( c.id );
         }
-            
+
         for ( Map.Entry<ServerAddress,List<Long>> e : m.entrySet() ){
             try {
                 killCursors( e.getKey() , e.getValue() );
@@ -171,7 +171,7 @@ public class DBApiLayer extends DB {
 
         OutMessage om = new OutMessage( _mongo , 2007 );
         om.writeInt( 0 ); // reserved
-            
+
         om.writeInt( Math.min( NUM_CURSORS_PER_BATCH , all.size() ) );
 
         int soFar = 0;
@@ -209,12 +209,16 @@ public class DBApiLayer extends DB {
             super.drop();
         }
 
-        public WriteResult insert(DBObject[] arr, com.mongodb.WriteConcern concern )
+        public WriteResult insert(DBObject[] arr, com.mongodb.WriteConcern concern, Boolean continueOnError )
             throws MongoException {
-            return insert( arr , true , concern );
+            return insert( arr , true , concern, continueOnError );
         }
 
-        protected WriteResult insert(DBObject[] arr, boolean shouldApply , com.mongodb.WriteConcern concern )
+        protected WriteResult insert(DBObject[] arr, boolean shouldApply , com.mongodb.WriteConcern concern ) {
+            return insert( arr, shouldApply, concern, false );
+        }
+
+        protected WriteResult insert(DBObject[] arr, boolean shouldApply , com.mongodb.WriteConcern concern, Boolean continueOnError )
             throws MongoException {
 
             if ( willTrace() ) {
@@ -222,7 +226,7 @@ public class DBApiLayer extends DB {
                     trace( "save:  " + _fullNameSpace + " " + JSON.serialize( o ) );
                 }
             }
-            
+
             if ( shouldApply ){
                 for ( int i=0; i<arr.length; i++ ){
                     DBObject o=arr[i];
@@ -241,10 +245,12 @@ public class DBApiLayer extends DB {
             int maxsize = _mongo.getMaxBsonObjectSize();
             while ( cur < arr.length ){
                 OutMessage om = new OutMessage( _mongo , 2002 );
-                
-                om.writeInt( 0 ); // reserved
+
+                int flags = 0;
+                if ( continueOnError ) flags |= 1;
+                om.writeInt( flags );
                 om.writeCString( _fullNameSpace );
-                
+
                 for ( ; cur<arr.length; cur++ ){
                     DBObject o = arr[cur];
                     om.putObject( o );
@@ -255,13 +261,13 @@ public class DBApiLayer extends DB {
                         break;
                     }
                 }
-                
+
                 last = _connector.say( _db , om , concern );
             }
-            
+
             return last;
         }
-        
+
         public WriteResult remove( DBObject o , com.mongodb.WriteConcern concern )
             throws MongoException {
 
@@ -271,7 +277,7 @@ public class DBApiLayer extends DB {
 
             om.writeInt( 0 ); // reserved
             om.writeCString( _fullNameSpace );
-            
+
             Collection<String> keys = o.keySet();
 
             if ( keys.size() == 1 &&
@@ -282,33 +288,33 @@ public class DBApiLayer extends DB {
                 om.writeInt( 0 );
 
             om.putObject( o );
-            
+
             return _connector.say( _db , om , concern );
         }
 
         @Override
         Iterator<DBObject> __find( DBObject ref , DBObject fields , int numToSkip , int batchSize, int limit , int options )
             throws MongoException {
-            
+
             if ( ref == null )
                 ref = new BasicDBObject();
-            
+
             if ( willTrace() ) trace( "find: " + _fullNameSpace + " " + JSON.serialize( ref ) );
-            
+
             OutMessage query = OutMessage.query( _mongo , options , _fullNameSpace , numToSkip , chooseBatchSize(batchSize, limit, 0) , ref , fields );
 
             Response res = _connector.call( _db , this , query , null , 2 );
 
             if ( res.size() == 0 )
                 return null;
-            
+
             if ( res.size() == 1 ){
                 BSONObject foo = res.get(0);
                 MongoException e = MongoException.parse( foo );
                 if ( e != null && ! _name.equals( "$cmd" ) )
                     throw e;
             }
-            
+
             return new Result( this , res , batchSize, limit , options );
         }
 
@@ -324,11 +330,11 @@ public class DBApiLayer extends DB {
             }
 
             if ( willTrace() ) trace( "update: " + _fullNameSpace + " " + JSON.serialize( query ) + " " + JSON.serialize( o )  );
-            
+
             OutMessage om = new OutMessage( _mongo , 2001 );
             om.writeInt( 0 ); // reserved
             om.writeCString( _fullNameSpace );
-            
+
             int flags = 0;
             if ( upsert ) flags |= 1;
             if ( multi ) flags |= 2;
@@ -336,13 +342,13 @@ public class DBApiLayer extends DB {
 
             om.putObject( query );
             om.putObject( o );
-            
+
             return _connector.say( _db , om , concern );
         }
-        
+
         public void createIndex( final DBObject keys, final DBObject options )
             throws MongoException {
-            
+
             DBObject full = new BasicDBObject();
             for ( String k : options.keySet() )
                 full.put( k , options.get( k ) );
@@ -398,10 +404,10 @@ public class DBApiLayer extends DB {
             while ( true ){
                 if ( _cur.hasNext() )
                     return true;
-                
+
                 if ( ! _curResult.hasGetMore( _options ) )
                     return false;
-                
+
                 _advance();
             }
         }
@@ -410,14 +416,14 @@ public class DBApiLayer extends DB {
 
             if ( _curResult.cursor() <= 0 )
                 throw new RuntimeException( "can't advance a cursor <= 0" );
-            
+
             OutMessage m = new OutMessage( _mongo , 2005 );
 
-            m.writeInt( 0 ); 
+            m.writeInt( 0 );
             m.writeCString( _collection._fullNameSpace );
             m.writeInt( chooseBatchSize(_batchSize, _limit, _numFetched) );
             m.writeLong( _curResult.cursor() );
-            
+
             Response res = _connector.call( DBApiLayer.this , _collection , m , _host );
             _numGetMores++;
             init( res );
@@ -426,11 +432,11 @@ public class DBApiLayer extends DB {
         public void remove(){
             throw new RuntimeException( "can't remove this way" );
         }
-        
+
         public int getBatchSize(){
             return _batchSize;
         }
-        
+
         public void setBatchSize(int size){
             _batchSize = size;
         }
@@ -454,13 +460,13 @@ public class DBApiLayer extends DB {
         public long totalBytes(){
             return _totalBytes;
         }
-        
+
         public long getCursorId(){
             if ( _curResult == null )
                 return 0;
             return _curResult._cursor;
         }
-        
+
         int numGetMores(){
             return _numGetMores;
         }
@@ -468,7 +474,7 @@ public class DBApiLayer extends DB {
         List<Integer> getSizes(){
             return Collections.unmodifiableList( _sizes );
         }
-        
+
         void close(){
             // not perfectly thread safe here, may need to use an atomicBoolean
             if (_curResult != null) {
@@ -500,7 +506,7 @@ public class DBApiLayer extends DB {
         public ServerAddress getServerAddress() {
             return _host;
         }
-        
+
         Response _curResult;
         Iterator<DBObject> _cur;
         int _batchSize;
@@ -513,11 +519,11 @@ public class DBApiLayer extends DB {
         private int _numGetMores = 0;
         private List<Integer> _sizes = new ArrayList<Integer>();
         private int _numFetched = 0;
-        
+
     }  // class Result
-    
+
     static class DeadCursor {
-        
+
         DeadCursor( long a , ServerAddress b ){
             id = a;
             host = b;
@@ -526,12 +532,12 @@ public class DBApiLayer extends DB {
         final long id;
         final ServerAddress host;
     }
-    
+
     final String _root;
     final String _rootPlusDot;
     final DBConnector _connector;
     final ConcurrentHashMap<String,MyCollection> _collections = new ConcurrentHashMap<String,MyCollection>();
-    
+
     ConcurrentLinkedQueue<DeadCursor> _deadCursorIds = new ConcurrentLinkedQueue<DeadCursor>();
 
     static final List<DBObject> EMPTY = Collections.unmodifiableList( new LinkedList<DBObject>() );

@@ -68,10 +68,6 @@ public class DBApiLayer extends DB {
             res = -res;
         }
 
-        if (res == 1) {
-            // optimization: use negative batchsize to close cursor
-            res = -1;
-        }
         return res;
     }
 

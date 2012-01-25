@@ -315,7 +315,7 @@ public class Mongo {
      * @return
      */
     public DB getDB( String dbname ){
-        return getDBWithCommandOnCreation(dbname, null);
+        return getDBWithAdminCommandOnCreation(dbname, null);
     }
 
   /**
@@ -323,18 +323,18 @@ public class Mongo {
      * @param dbname the database name
      * @return
      */
-    public DB getDBWithCommandOnCreation( String dbname, DBObject cmd ){
+    public DB getDBWithAdminCommandOnCreation(String dbname, DBObject cmd){
         DB db = _dbs.get( dbname );
         if ( db != null )
             return db;
 
         db = new DBApiLayer( this , dbname , _connector );
         DB temp = _dbs.putIfAbsent( dbname , db );
+        if ( cmd != null ) {
+            getDB("admin").command(cmd);
+        }
         if ( temp != null )
             return temp;
-        if ( cmd != null ) {
-            db.command( cmd );
-        }
         return db;
     }
 
@@ -345,7 +345,7 @@ public class Mongo {
      */
     public DB getShardedDB( String dbname){
         DBObject cmd = new BasicDBObject( "enablesharding", dbname );
-        return getDBWithCommandOnCreation( dbname, cmd );
+        return getDBWithAdminCommandOnCreation(dbname, cmd);
     }
 
     /**

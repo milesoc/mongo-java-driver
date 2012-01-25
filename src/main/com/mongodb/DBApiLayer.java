@@ -117,7 +117,7 @@ public class DBApiLayer extends DB {
             c = new MyCollection( name );
             _collections.put( name , c );
             if ( cmd != null ) {
-                command(cmd);
+                getMongo().getDB("admin").command(cmd);
             }
         }
 

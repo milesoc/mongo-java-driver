@@ -17,8 +17,7 @@ package com.mongodb;
 
 import java.io.IOException;
 import java.io.InputStream;
-import org.bson.BSONCallback;
-import org.bson.BSONObject;
+
 import org.bson.BasicBSONDecoder;
 
 /**

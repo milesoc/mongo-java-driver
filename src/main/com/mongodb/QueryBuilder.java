@@ -18,7 +18,8 @@
 
 package com.mongodb;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Pattern;
 
 /**
@@ -273,6 +274,23 @@ public class QueryBuilder {
             _query.put( "$or" , l );
         }
         for ( DBObject o : ors )
+            l.add( o );
+        return this;
+    }
+
+    /**
+     * Equivalent to an $and operand
+     * @param ands
+     * @return
+     */
+    @SuppressWarnings("unchecked")
+    public QueryBuilder and( DBObject ... ands ){
+        List l = (List)_query.get( "$and" );
+        if ( l == null ){
+            l = new ArrayList();
+            _query.put( "$and" , l );
+        }
+        for ( DBObject o : ands )
             l.add( o );
         return this;
     }

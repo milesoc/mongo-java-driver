@@ -20,14 +20,23 @@ package com.mongodb.util;
 
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
-import java.util.*;
+import java.util.Date;
+import java.util.GregorianCalendar;
+import java.util.SimpleTimeZone;
+import java.util.UUID;
 import java.util.regex.Pattern;
 
 import org.bson.BSON;
 import org.bson.BasicBSONObject;
-import org.bson.types.*;
+import org.bson.types.BSONTimestamp;
+import org.bson.types.Code;
+import org.bson.types.CodeWScope;
+import org.bson.types.ObjectId;
 
-import com.mongodb.*;
+import com.mongodb.BasicDBObject;
+import com.mongodb.BasicDBObjectBuilder;
+import com.mongodb.DBObject;
+import com.mongodb.DBRef;
 
 public class JSONTest extends com.mongodb.util.TestCase {
 
@@ -275,6 +284,23 @@ public class JSONTest extends com.mongodb.util.TestCase {
    }
 
    @org.testng.annotations.Test
+   public void testRegexNoOptions() {
+       String x = "^Hello$";
+       String serializedPattern =
+       "{ \"$regex\" : \"" + x + "\"}";
+
+       Pattern pattern = Pattern.compile( x );
+       assertEquals( serializedPattern, JSON.serialize(pattern));
+
+       BasicDBObject a = new BasicDBObject( "x" , pattern );
+       assertEquals( "{ \"x\" : " + serializedPattern + "}" , a.toString() );
+
+       DBObject b = (DBObject)JSON.parse( a.toString() );
+       assertEquals( b.get("x").getClass(), Pattern.class );
+       assertEquals( a.toString() , b.toString() );
+   }
+
+   @org.testng.annotations.Test
    public void testObjectId() {
        ObjectId oid = new ObjectId(new Date());
 
@@ -288,7 +314,7 @@ public class JSONTest extends com.mongodb.util.TestCase {
    @org.testng.annotations.Test
    public void testDate() {
        Date d = new Date();
-       SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'");
+       SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
        format.setCalendar(new GregorianCalendar(new SimpleTimeZone(0, "GMT")));
        String formattedDate = format.format(d);
 
@@ -297,6 +323,7 @@ public class JSONTest extends com.mongodb.util.TestCase {
 
        Date d2 = (Date)JSON.parse(serialized);
        assertEquals(d.toString(), d2.toString());
+       assertTrue(d.equals(d2));
    }
 
     @org.testng.annotations.Test

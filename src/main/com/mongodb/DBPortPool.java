@@ -19,11 +19,18 @@
 package com.mongodb;
 
 import java.lang.management.ManagementFactory;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Semaphore;
 import java.util.logging.Level;
 
-import javax.management.*;
+import javax.management.JMException;
+import javax.management.MBeanServer;
+import javax.management.MalformedObjectNameException;
+import javax.management.ObjectName;
 
 import com.mongodb.util.SimplePool;
 
@@ -164,22 +171,22 @@ public class DBPortPool extends SimplePool<DBPort> {
     }
     
     public DBPort get(){
-	DBPort port = null;
-	if ( ! _waitingSem.tryAcquire() )
-	    throw new SemaphoresOut();
+        DBPort port = null;
+        if ( ! _waitingSem.tryAcquire() )
+            throw new SemaphoresOut();
 
-	try {
-	    port = get( _options.maxWaitTime );
-	}
-	finally {
-	    _waitingSem.release();
-	}
+        try {
+            port = get( _options.maxWaitTime );
+        }
+        finally {
+            _waitingSem.release();
+        }
 
-	if ( port == null )
-	    throw new ConnectionWaitTimeOut( _options.maxWaitTime );
-	
-        port._lastThread = System.identityHashCode(Thread.currentThread());
-	return port;
+        if ( port == null )
+            throw new ConnectionWaitTimeOut( _options.maxWaitTime );
+        
+            port._lastThread = System.identityHashCode(Thread.currentThread());
+        return port;
     }
 
     void gotError( Exception e ){

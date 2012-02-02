@@ -19,7 +19,10 @@
 package com.mongodb;
 
 import java.net.UnknownHostException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -42,32 +45,6 @@ import org.bson.io.PoolOutputBuffer;
  * Mongo instances have connection pooling built in - see the requestStart
  * and requestDone methods for more information.
  * http://www.mongodb.org/display/DOCS/Java+Driver+Concurrency
- *
- * <h3>Connecting to a Replica Pair</h3>
- * <p>
- * You can connect to a
- * <a href="http://www.mongodb.org/display/DOCS/Replica+Pairs">replica pair</a>
- * using the Java driver by passing two DBAddresses to the Mongo constructor.
- * For example:
- * </p>
- * <blockquote><pre>
- * DBAddress left = new DBAddress("127.0.0.1:27017/test");
- * DBAddress right = new DBAddress("127.0.0.1:27018/test");
- *
- * Mongo mongo = new Mongo(left, right);
- * </pre></blockquote>
- *
- * <p>
- * If the master of a replica pair goes down, there will be a brief lag before
- * the slave becomes master.  Thus, your application should be prepared to catch
- * the exceptions that might be thrown in such a case: IllegalArgumentException,
- * MongoException, and MongoException.Network (depending on when the connection
- * drops).
- * </p>
- * <p>
- * Once the slave becomes master, the driver will begin using that connection
- * as the master connection and the exceptions will stop being thrown.
- * </p>
  *
  * <h3>Connecting to a Replica Set</h3>
  * <p>
@@ -96,13 +73,9 @@ import org.bson.io.PoolOutputBuffer;
  */
 public class Mongo {
 
-    /**
-     *
-     */
+    // Make sure you don't change the format of these two lines. A preprocessing regexp
+    // is applied and updates the version based on configuration in build.properties.
     public static final int MAJOR_VERSION = 2;
-    /**
-     *
-     */
     public static final int MINOR_VERSION = 7;
 
     static int cleanerIntervalMS;
@@ -175,7 +148,6 @@ public class Mongo {
         this( addr , new MongoOptions() );
     }
 
-
     /**
      * Creates a Mongo instance based on a (single) mongo node using a given ServerAddress
      * @see com.mongodb.ServerAddress
@@ -205,6 +177,7 @@ public class Mongo {
      * @param right right side of the pair
      * @throws MongoException
      */
+    @Deprecated
     public Mongo( ServerAddress left , ServerAddress right )
         throws MongoException {
         this( left , right , new MongoOptions() );
@@ -221,6 +194,7 @@ public class Mongo {
      * @param options
      * @throws MongoException
      */
+    @Deprecated
     public Mongo( ServerAddress left , ServerAddress right , MongoOptions options )
         throws MongoException {
         _addr = null;
@@ -236,7 +210,9 @@ public class Mongo {
 
     /**
      * <p>Creates a Mongo based on a replica set, or pair.
-     * It will find all members (the master will be used by default).</p>
+     * It will find all members (the master will be used by default). If you pass in a single server in the list,
+     * the driver will still function as if it is a replica set. If you have a standalone server,
+     * use the Mongo(ServerAddress) constructor.</p>
      * @see com.mongodb.ServerAddress
      * @param replicaSetSeeds Put as many servers as you can in the list and
      * the system will figure out the rest.
@@ -468,8 +444,13 @@ public class Mongo {
      * Once called, this Mongo instance can no longer be used.
      */
     public void close(){
-        _connector.close();
+
+        try {
+            _connector.close();
+        } catch (final Throwable t) { /* nada */ }
+
         _cleaner.interrupt();
+
         try {
             _cleaner.join();
         } catch (InterruptedException e) {
@@ -497,8 +478,31 @@ public class Mongo {
     }
 
     /**
-     * makes it possible to run read queries on slave nodes
+     * Sets the read preference for this database. Will be used as default for
+     * reads from any collection in any database. See the
+     * documentation for {@link ReadPreference} for more information.
+     *
+     * @param preference Read Preference to use
      */
+    public void setReadPreference( ReadPreference preference ){
+        _readPref = preference;
+    }
+
+    /**
+     * Gets the default read preference
+     * @return
+     */
+    public ReadPreference getReadPreference(){
+        return _readPref;
+    }
+
+    /**
+     * makes it possible to run read queries on slave nodes
+     *
+     * @deprecated Replaced with ReadPreference.SECONDARY
+     * @see com.mongodb.ReadPreference.SECONDARY
+     */
+    @Deprecated
     public void slaveOk(){
         addOption( Bytes.QUERYOPTION_SLAVEOK );
     }
@@ -538,6 +542,7 @@ public class Mongo {
      * Helper method for setting up MongoOptions at instantiation
      * so that any options which affect this connection can be set.
      */
+    @SuppressWarnings("deprecation")
     void _applyMongoOptions() {
         if (_options.slaveOk) slaveOk();
         setWriteConcern( _options.getWriteConcern() );
@@ -569,6 +574,7 @@ public class Mongo {
     final DBTCPConnector _connector;
     final ConcurrentMap<String,DB> _dbs = new ConcurrentHashMap<String,DB>();
     private WriteConcern _concern = WriteConcern.NORMAL;
+    private ReadPreference _readPref = ReadPreference.PRIMARY;
     final Bytes.OptionHolder _netOptions = new Bytes.OptionHolder( null );
     final DBCleanerThread _cleaner;
 
@@ -714,16 +720,15 @@ public class Mongo {
 
     @Override
     public String toString() {
-        String str = "Mongo: ";
+        StringBuilder str = new StringBuilder("Mongo: ");
         List<ServerAddress> list = getServerAddressList();
-        if (list == null || list.isEmpty())
-            str += "null";
+        if (list == null || list.size() == 0)
+            str.append("null");
         else {
-            for (ServerAddress addr : list) {
-                str += addr.toString() + ",";
-            }
-            str = str.substring(0, str.length() - 1);
+            for ( ServerAddress addr : list )
+                str.append( addr.toString() ).append( ',' );
+            str.deleteCharAt( str.length() - 1 );
         }
-        return str;
+        return str.toString();
     }
 }

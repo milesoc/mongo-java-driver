@@ -18,10 +18,18 @@
 
 package com.mongodb;
 
-import java.io.*;
-import java.util.*;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 
-import com.mongodb.util.*;
+import com.mongodb.DBApiLayer.Result;
+import com.mongodb.util.Util;
 
 /**
  * an abstract class that represents a logical database on a server
@@ -52,24 +60,24 @@ public abstract class DB {
     public abstract void requestDone();
 
     /**
-     * ensure that a connection is assigned to the current "consistent request"
+     * ensure that a connection is assigned to the current "consistent request" (from primary pool, if connected to a replica set)
      */
     public abstract void requestEnsureConnection();
-    
+
     /**
      * Returns the collection represented by the string &lt;dbName&gt;.&lt;collectionName&gt;.
      * @param name the name of the collection
      * @return the collection
      */
     protected abstract DBCollection doGetCollection( String name );
-    
+
     /**
      * Gets a collection with a given name.
      * If the collection does not exist, a new collection is created.
      * @param name the name of the collection to return
      * @return the collection
      */
-    public final DBCollection getCollection( String name ){
+    public DBCollection getCollection( String name ){
         DBCollection c = doGetCollection( name );
         return c;
     }
@@ -120,7 +128,7 @@ public abstract class DB {
      * @param options options
      * @return the collection
      */
-    public final DBCollection createCollection( String name, DBObject options ){
+    public DBCollection createCollection( String name, DBObject options ){
         if ( options != null ){
             DBObject createCmd = new BasicDBObject("create", name);
             createCmd.putAll(options);
@@ -130,7 +138,7 @@ public abstract class DB {
         return getCollection(name);
     }
 
-    
+
     /**
      * Returns a collection matching a given string.
      * @param s the name of the collection
@@ -138,7 +146,7 @@ public abstract class DB {
      */
     public DBCollection getCollectionFromString( String s ){
         DBCollection foo = null;
-        
+
         int idx = s.indexOf( "." );
         while ( idx >= 0 ){
             String b = s.substring( 0 , idx );
@@ -164,9 +172,33 @@ public abstract class DB {
      * @throws MongoException
      * @dochub commands
      */
-    public CommandResult command( DBObject cmd )
+    public CommandResult command( DBObject cmd ) throws MongoException{
+        return command( cmd, 0 );
+    }
+
+    /**
+     * Executes a database command.
+     * @see <a href="http://mongodb.onconfluence.com/display/DOCS/List+of+Database+Commands">List of Commands</a>
+     * @param cmd dbobject representing the command to execute
+     * @param options query options to use
+     * @param readPrefs ReadPreferences for this command (nodes selection is the biggest part of this)
+     * @return result of command from the database
+     * @dochub commands
+     * @throws MongoException
+     */
+    public CommandResult command( DBObject cmd , int options, ReadPreference readPrefs )
         throws MongoException {
-        return command( cmd , 0 );
+
+        Iterator<DBObject> i = getCollection("$cmd").__find(cmd, new BasicDBObject(), 0, -1, 0, options, readPrefs , DefaultDBDecoder.FACTORY.create());
+        if ( i == null || ! i.hasNext() )
+            return null;
+
+        DBObject res = i.next();
+        ServerAddress sa = (i instanceof Result) ? ((Result) i).getServerAddress() : null;
+        CommandResult cr = new CommandResult(sa);
+        cr.putAll( res );
+        cr._cmd = cmd;
+        return cr;
     }
 
     /**
@@ -180,16 +212,8 @@ public abstract class DB {
      */
     public CommandResult command( DBObject cmd , int options )
         throws MongoException {
-        
-        Iterator<DBObject> i = getCollection("$cmd").__find(cmd, new BasicDBObject(), 0, -1, 0, options);
-        if ( i == null || ! i.hasNext() )
-            return null;
-        
-        CommandResult res = (CommandResult)i.next();
-        res._cmd = cmd;
-        return res;
+	return command(cmd, options, null);
     }
-
     /**
      * Executes a database command.
      * This method constructs a simple dbobject and calls {@link DB#command(com.mongodb.DBObject) }
@@ -222,7 +246,7 @@ public abstract class DB {
      * This is useful if you need to touch a lot of data lightly, in which case network transfer could be a bottleneck.
      * @param code the function in javascript code
      * @param args arguments to be passed to the function
-     * @return
+     * @return The command result
      * @throws MongoException
      */
     public CommandResult doEval( String code , Object ... args )
@@ -240,12 +264,12 @@ public abstract class DB {
      * Otherwise an exception is thrown.
      * @param code the function in javascript code
      * @param args arguments to be passed to the function
-     * @return
+     * @return The object
      * @throws MongoException
      */
     public Object eval( String code , Object ... args )
         throws MongoException {
-        
+
         CommandResult res = doEval( code , args );
         res.throwOnError();
         return res.get( "retval" );
@@ -288,7 +312,8 @@ public abstract class DB {
         if (namespaces == null)
             throw new RuntimeException("this is impossible");
 
-        Iterator<DBObject> i = namespaces.__find(new BasicDBObject(), null, 0, 0, 0, getOptions());
+        // TODO - Is ReadPreference OK for collection Names?
+        Iterator<DBObject> i = namespaces.__find(new BasicDBObject(), null, 0, 0, 0, getOptions(), null, null);
         if (i == null)
             return new HashSet<String>();
 
@@ -375,7 +400,7 @@ public abstract class DB {
     }
 
     /**
-     * @see {@link DB#getLastError()}
+     * @see {@link DB#getLastError() }
      * @param concern the concern associated with "getLastError" call
      * @return
      * @throws MongoException
@@ -387,10 +412,10 @@ public abstract class DB {
 
     /**
      * @see {@link DB#getLastError(com.mongodb.WriteConcern) }
-     * @param w 
+     * @param w
      * @param wtimeout
      * @param fsync
-     * @return
+     * @return The command result
      * @throws MongoException
      */
     public CommandResult getLastError( int w , int wtimeout , boolean fsync )
@@ -403,11 +428,10 @@ public abstract class DB {
      * Sets the write concern for this database. It Will be used for
      * writes to any collection in this database. See the
      * documentation for {@link WriteConcern} for more information.
-     *
      * @param concern write concern to use
      */
     public void setWriteConcern( com.mongodb.WriteConcern concern ){
-	if (concern == null) throw new IllegalArgumentException();
+        if (concern == null) throw new IllegalArgumentException();
         _concern = concern;
     }
 
@@ -419,6 +443,27 @@ public abstract class DB {
         if ( _concern != null )
             return _concern;
         return _mongo.getWriteConcern();
+    }
+
+    /**
+     * Sets the read preference for this database. Will be used as default for
+     * reads from any collection in this database. See the
+     * documentation for {@link ReadPreference} for more information.
+     *
+     * @param preference Read Preference to use
+     */
+    public void setReadPreference( ReadPreference preference ){
+        _readPref = preference;
+    }
+
+    /**
+     * Gets the default read preference
+     * @return
+     */
+    public ReadPreference getReadPreference(){
+        if ( _readPref != null )
+            return _readPref;
+        return _mongo.getReadPreference();
     }
 
     /**
@@ -454,13 +499,13 @@ public abstract class DB {
      */
     public boolean authenticate(String username, char[] passwd )
         throws MongoException {
-        
+
         if ( username == null || passwd == null )
             throw new NullPointerException( "username can't be null" );
-        
+
         if ( _username != null )
 	    throw new IllegalStateException( "can't call authenticate twice on the same DBObject" );
-        
+
         String hash = _hash( username , passwd );
         CommandResult res = _doauth( username , hash.getBytes() );
         if ( !res.ok())
@@ -495,7 +540,7 @@ public abstract class DB {
         _authhash = hash.getBytes();
         return res;
     }
-    
+
     /*
     boolean reauth(){
         if ( _username == null || _authhash == null )
@@ -513,23 +558,23 @@ public abstract class DB {
 
     static DBObject _authCommand( String nonce , String username , byte[] hash ){
         String key = nonce + username + new String( hash );
-        
+
         BasicDBObject cmd = new BasicDBObject();
 
         cmd.put("authenticate", 1);
         cmd.put("user", username);
         cmd.put("nonce", nonce);
         cmd.put("key", Util.hexMD5(key.getBytes()));
-        
+
         return cmd;
     }
 
     private CommandResult _doauth( String username , byte[] hash ){
-        CommandResult res = command(new BasicDBObject("getnonce", 1), getOptions());
+        CommandResult res = command(new BasicDBObject("getnonce", 1));
         res.throwOnError();
 
         DBObject cmd = _authCommand( res.getString( "nonce" ) , username , hash );
-        return command(cmd, getOptions());
+        return command(cmd);
     }
 
     /**
@@ -645,7 +690,11 @@ public abstract class DB {
 
     /**
      * Makes it possible to execute "read" queries on a slave node
+     *
+     * @deprecated Replaced with ReadPreference.SECONDARY
+     * @see com.mongodb.ReadPreference.SECONDARY
      */
+    @Deprecated
     public void slaveOk(){
         addOption( Bytes.QUERYOPTION_SLAVEOK );
     }
@@ -672,7 +721,7 @@ public abstract class DB {
     public void resetOptions(){
         _options.reset();
     }
-   
+
     /**
      * Gets the query options
      * @return
@@ -689,6 +738,7 @@ public abstract class DB {
 
     protected boolean _readOnly = false;
     private com.mongodb.WriteConcern _concern;
+    private com.mongodb.ReadPreference _readPref;
     final Bytes.OptionHolder _options;
 
     String _username;

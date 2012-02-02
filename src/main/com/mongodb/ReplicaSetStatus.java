@@ -1,18 +1,41 @@
 // ReplicaSetStatus.java
 
+/**
+ *      Copyright (C) 2008 10gen Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */
+
 package com.mongodb;
 
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+
+import com.mongodb.util.JSON;
 
 /**
  * keeps replica set status
@@ -26,14 +49,17 @@ import java.util.logging.Logger;
  */
 public class ReplicaSetStatus {
 
-    static final Logger _rootLogger = Logger.getLogger( "com.mongodb.ReplicaSetStatus" );
+	static final Logger _rootLogger = Logger.getLogger( "com.mongodb.ReplicaSetStatus" );
     static final int UNAUTHENTICATED_ERROR_CODE = 10057;
 
     ReplicaSetStatus( Mongo mongo, List<ServerAddress> initial ){
+        _mongoOptions = _mongoOptionsDefaults.copy();
+        _mongoOptions.socketFactory = mongo._options.socketFactory;
+
         _mongo = mongo;
         _all = Collections.synchronizedList( new ArrayList<Node>() );
         for ( ServerAddress addr : initial ){
-            _all.add( new Node( addr ) );
+            _all.add( new Node( addr, _all,  _logger, _mongo, _mongoOptions, _maxBsonObjectSize, _setName, _lastPrimarySignal ) );
         }
         _nextResolveTime = System.currentTimeMillis() + inetAddrCacheMS;
 
@@ -43,24 +69,41 @@ public class ReplicaSetStatus {
     void start() {
         _updater.start();
     }
-    
+
     boolean ready(){
-        return _setName != null;
+        return _setName.get() != null;
     }
 
     public String getName() {
-        return _setName;
+        return _setName.get();
     }
 
+    @Override
+	public String toString() {
+	StringBuffer sb = new StringBuffer();
+	sb.append("{replSetName: '" + _setName.get() );
+	sb.append("', closed:").append(_closed.get()).append(", ");
+	sb.append("nextResolveTime:'").append(new Date(_nextResolveTime).toString()).append("', ");
+	sb.append("members : [ ");
+	if(_all != null) {
+		for(Node n : _all)
+			sb.append(n.toJSON()).append(",");
+		sb.setLength(sb.length()-1); //remove last comma
+	}
+	sb.append("] ");
+
+	return sb.toString();
+	}
+
     void _checkClosed(){
-        if ( _closed )
+        if ( _closed.get() )
             throw new IllegalStateException( "ReplicaSetStatus closed" );
     }
 
     /**
      * @return master or null if don't have one
      */
-    ServerAddress getMaster(){
+    public ServerAddress getMaster(){
         Node n = getMasterNode();
         if ( n == null )
             return null;
@@ -77,22 +120,75 @@ public class ReplicaSetStatus {
         return null;
     }
 
+	/**
+	 * @param srv
+	 *            the server to compare
+	 * @return indication if the ServerAddress is the current Master/Primary
+	 */
+	public boolean isMaster(ServerAddress srv) {
+		if (srv == null)
+			return false;
+
+		return srv.equals(getMaster());
+	}
+
+    /**
+     * @return a good secondary by tag value or null if can't find one
+     */
+    ServerAddress getASecondary( DBObject tags ){
+        for ( String key : tags.keySet() ) {
+            ServerAddress secondary = getASecondary( key, tags.get( key ).toString() );
+            if (secondary != null)
+                return secondary;
+        }
+        // No matching server for any supplied tags was found
+        return null;
+    }
+
     /**
      * @return a good secondary or null if can't find one
      */
     ServerAddress getASecondary(){
+        return getASecondary( null, null );
+    }
+    /**
+     * @return a good secondary or null if can't find one
+     */
+    ServerAddress getASecondary( String tagKey, String tagValue ) {
         _checkClosed();
+        return getASecondary(tagKey, tagValue, _all, _random);
+    }
+
+    /**
+     * This was extracted so we can test the logic from a unit test. This can't be
+     * tested from a standalone unit test until node is more decoupled from this class.
+     *
+     * @return a good secondary or null if can't find one
+     */
+    static ServerAddress getASecondary( final String pTagKey,
+                                        final String pTagValue,
+                                        final List<Node> pNodes,
+                                        final Random pRandom)
+    {
         Node best = null;
         double badBeforeBest = 0;
 
-        int start = _random.nextInt( _all.size() );
+        if (pTagKey == null && pTagValue != null || pTagValue == null & pTagKey != null)
+           throw new IllegalArgumentException( "Tag Key & Value must be consistent: both defined or not defined." );
+
+        int start = pRandom.nextInt( pNodes.size() );
+
+        final int nodeCount = pNodes.size();
 
         double mybad = 0;
 
-        for ( int i=0; i<_all.size(); i++ ){
-            Node n = _all.get( ( start + i ) % _all.size() );
+        for ( int i=0; i < nodeCount; i++ ){
+            Node n = pNodes.get( ( start + i ) % nodeCount );
 
             if ( ! n.secondary() ){
+                mybad++;
+                continue;
+            } else if (pTagKey != null && !n.checkTag( pTagKey, pTagValue )){
                 mybad++;
                 continue;
             }
@@ -104,11 +200,10 @@ public class ReplicaSetStatus {
                 continue;
             }
 
-            long diff = best._pingTime - n._pingTime;
-            if ( diff > slaveAcceptableLatencyMS ||
-                 // this is a complex way to make sure we get a random distribution of slaves
-                 ( ( badBeforeBest - mybad ) / ( _all.size() - 1 ) ) > _random.nextDouble() )
-                {
+            float diff = best._pingTime - n._pingTime;
+
+            // this is a complex way to make sure we get a random distribution of slaves
+            if ( diff > slaveAcceptableLatencyMS || ( ( badBeforeBest - mybad ) / ( nodeCount  - 1 ) ) > pRandom.nextDouble() && diff > -1*slaveAcceptableLatencyMS ) {
                 best = n;
                 badBeforeBest = mybad;
                 mybad = 0;
@@ -116,9 +211,7 @@ public class ReplicaSetStatus {
 
         }
 
-        if ( best == null )
-            return null;
-        return best._addr;
+        return ( best != null ) ? best._addr : null;
     }
 
     boolean hasServerUp() {
@@ -131,12 +224,32 @@ public class ReplicaSetStatus {
         return false;
     }
 
-    class Node {
+    /**
+     * The replica set node object.
+     */
+    static class Node {
 
-        Node( ServerAddress addr ){
+        Node(   ServerAddress addr,
+                List<Node> all,
+                AtomicReference<Logger> logger,
+                Mongo mongo,
+                MongoOptions mongoOptions,
+                AtomicInteger maxBsonObjectSize,
+                AtomicReference<String> setName,
+                AtomicReference<String> lastPrimarySignal )
+        {
             _addr = addr;
+            _all = all;
+            _mongoOptions = mongoOptions;
             _port = new DBPort( addr , null , _mongoOptions );
             _names.add( addr.toString() );
+            _logger = logger;
+            _mongo = mongo;
+
+            _maxBsonObjectSize = maxBsonObjectSize;
+            _setName = setName;
+            _lastPrimarySignal = lastPrimarySignal;
+
         }
 
         private void updateAddr() {
@@ -145,10 +258,10 @@ public class ReplicaSetStatus {
                     // address changed, need to use new ports
                     _port = new DBPort(_addr, null, _mongoOptions);
                     _mongo.getConnector().updatePortPool(_addr);
-                    _logger.log(Level.INFO, "Address of host " + _addr.toString() + " changed to " + _addr.getSocketAddress().toString());
+                    _logger.get().log(Level.INFO, "Address of host " + _addr.toString() + " changed to " + _addr.getSocketAddress().toString());
                 }
             } catch (UnknownHostException ex) {
-                _logger.log(Level.WARNING, null, ex);
+                _logger.get().log(Level.WARNING, null, ex);
             }
         }
 
@@ -160,20 +273,26 @@ public class ReplicaSetStatus {
             try {
                 long start = System.currentTimeMillis();
                 CommandResult res = _port.runCommand( _mongo.getDB("admin") , _isMasterCmd );
+                boolean first = (_lastCheck == 0);
                 _lastCheck = System.currentTimeMillis();
-                _pingTime = _lastCheck - start;
+                float newPing = _lastCheck - start;
+                if (first)
+                    _pingTime = newPing;
+                else
+                    _pingTime = _pingTime + ((newPing - _pingTime) / latencySmoothFactor);
+                _rootLogger.log( Level.FINE , "Latency to " + _addr + " actual=" + newPing + " smoothed=" + _pingTime );
 
                 if ( res == null ){
                     throw new MongoInternalException("Invalid null value returned from isMaster");
                 }
 
                 if (!_ok) {
-                    _logger.log( Level.WARNING , "Server seen up: " + _addr );
+                    _logger.get().log( Level.INFO , "Server seen up: " + _addr );
                 }
                 _ok = true;
                 _isMaster = res.getBoolean( "ismaster" , false );
                 _isSecondary = res.getBoolean( "secondary" , false );
-                _lastPrimarySignal = res.getString( "primary" );
+                _lastPrimarySignal.set( res.getString( "primary" ) );
 
                 if ( res.containsField( "hosts" ) ){
                     for ( Object x : (List)res.get("hosts") ){
@@ -193,22 +312,30 @@ public class ReplicaSetStatus {
                     }
                 }
 
-                if (_isMaster ) {
+                // Tags were added in 2.0 but may not be present
+                if (res.containsField( "tags" )) {
+                    DBObject tags = (DBObject) res.get( "tags" );
+                    for ( String key : tags.keySet() ) {
+                        _tags.put( key, tags.get( key ).toString() );
+                    }
+                }
+
+                if ( _isMaster ) {
                     // max size was added in 1.8
                     if (res.containsField("maxBsonObjectSize"))
-                        maxBsonObjectSize = ((Integer)res.get( "maxBsonObjectSize" )).intValue();
+                        _maxBsonObjectSize.set(((Integer)res.get( "maxBsonObjectSize" )).intValue());
                     else
-                        maxBsonObjectSize = Bytes.MAX_OBJECT_SIZE;
+                        _maxBsonObjectSize.set(Bytes.MAX_OBJECT_SIZE);
                 }
 
                 if (res.containsField("setName")) {
 	                String setName = res.get( "setName" ).toString();
-	                if ( _setName == null ){
-	                    _setName = setName;
-	                    _logger = Logger.getLogger( _rootLogger.getName() + "." + setName );
+	                if ( _setName.get() == null ){
+	                    _setName.set(setName);
+	                    _logger.set( Logger.getLogger( _rootLogger.getName() + "." + setName ) );
 	                }
-	                else if ( !_setName.equals( setName ) ){
-	                    _logger.log( Level.SEVERE , "mis match set name old: " + _setName + " new: " + setName );
+	                else if ( !_setName.get().equals( setName ) ){
+	                    _logger.get().log( Level.SEVERE , "mismatch set name old: " + _setName.get() + " new: " + setName );
 	                    return;
 	                }
                 }
@@ -216,9 +343,9 @@ public class ReplicaSetStatus {
             }
             catch ( Exception e ){
                 if (_ok == true) {
-                    _logger.log( Level.WARNING , "Server seen down: " + _addr, e );
+                    _logger.get().log( Level.WARNING , "Server seen down: " + _addr, e );
                 } else if (Math.random() < 0.1) {
-                    _logger.log( Level.WARNING , "Server seen down: " + _addr );
+                    _logger.get().log( Level.WARNING , "Server seen down: " + _addr, e );
                 }
                 _ok = false;
             }
@@ -227,12 +354,30 @@ public class ReplicaSetStatus {
                 return;
         }
 
+        Node _addIfNotHere( String host ){
+            Node n = findNode( host, _all, _logger );
+            if ( n == null ){
+                try {
+                    n = new Node( new ServerAddress( host ), _all, _logger, _mongo, _mongoOptions, _maxBsonObjectSize, _setName, _lastPrimarySignal );
+                    _all.add( n );
+                }
+                catch ( UnknownHostException un ){
+                    _logger.get().log( Level.WARNING , "couldn't resolve host [" + host + "]" );
+                }
+            }
+            return n;
+        }
+
         public boolean master(){
             return _ok && _isMaster;
         }
 
         public boolean secondary(){
             return _ok && _isSecondary;
+        }
+
+        public boolean checkTag(String key, String value){
+            return _tags.containsKey( key ) && _tags.get( key ).equals( value );
         }
 
         public String toString(){
@@ -246,6 +391,23 @@ public class ReplicaSetStatus {
 
             buf.append( "\t priority \t" ).append( _priority ).append( "\n" );
 
+            buf.append( "\t tags \t" ).append( JSON.serialize( _tags )  ).append( "\n" );
+
+            return buf.toString();
+        }
+
+        public String toJSON(){
+            StringBuilder buf = new StringBuilder();
+            buf.append( "{ address:'" ).append( _addr ).append( "', " );
+            buf.append( "ok:" ).append( _ok ).append( ", " );
+            buf.append( "ping:" ).append( _pingTime ).append( ", " );
+            buf.append( "isMaster:" ).append( _isMaster ).append( ", " );
+            buf.append( "isSecondary:" ).append( _isSecondary ).append( ", " );
+            buf.append( "priority:" ).append( _priority ).append( ", " );
+            if(_tags != null && _tags.size() > 0)
+		        buf.append( "tags:" ).append( JSON.serialize( _tags )  );
+            buf.append("}");
+
             return buf.toString();
         }
 
@@ -253,19 +415,28 @@ public class ReplicaSetStatus {
             _port.close();
             _port = null;
         }
-        
+
         final ServerAddress _addr;
-        final Set<String> _names = Collections.synchronizedSet( new HashSet<String>() );
-        DBPort _port; // we have our own port so we can set different socket options and don't have to owrry about the pool
+        private final Set<String> _names = Collections.synchronizedSet( new HashSet<String>() );
+        private DBPort _port; // we have our own port so we can set different socket options and don't have to owrry about the pool
+        private final LinkedHashMap<String, String> _tags = new LinkedHashMap<String, String>( );
 
         boolean _ok = false;
         long _lastCheck = 0;
-        long _pingTime = 0;
+        float _pingTime = 0;
 
         boolean _isMaster = false;
         boolean _isSecondary = false;
 
         double _priority = 0;
+
+        private final AtomicReference<Logger> _logger;
+        private final MongoOptions _mongoOptions;
+        private final Mongo _mongo;
+        private final AtomicInteger _maxBsonObjectSize;
+        private final AtomicReference<String> _setName;
+        private final AtomicReference<String> _lastPrimarySignal;
+        private final List<Node> _all;
     }
 
     class Updater extends Thread {
@@ -275,7 +446,7 @@ public class ReplicaSetStatus {
         }
 
         public void run(){
-            while ( ! _closed ){
+            while ( ! _closed.get() ){
                 try {
                     updateAll();
 
@@ -292,7 +463,7 @@ public class ReplicaSetStatus {
                     _mongo.getConnector().checkMaster(true, false);
                 }
                 catch ( Exception e ){
-                    _logger.log( Level.WARNING , "couldn't do update pass" , e );
+                    _logger.get().log( Level.WARNING , "couldn't do update pass" , e );
                 }
 
                 try {
@@ -313,8 +484,8 @@ public class ReplicaSetStatus {
                 return n;
         }
 
-        if ( _lastPrimarySignal != null ){
-            n = findNode( _lastPrimarySignal );
+        if ( _lastPrimarySignal.get() != null ){
+            n = findNode( _lastPrimarySignal.get() );
             if (n != null) {
                 n.update();
                 if ( n._isMaster )
@@ -333,7 +504,7 @@ public class ReplicaSetStatus {
             n.update(seenNodes);
         }
 
-        if (!seenNodes.isEmpty()) {
+        if (seenNodes.size() > 0) {
             // not empty, means that at least 1 server gave node list
             // remove unused hosts
             Iterator<Node> it = _all.iterator();
@@ -351,38 +522,28 @@ public class ReplicaSetStatus {
         return addrs;
     }
 
-    Node _addIfNotHere( String host ){
-        Node n = findNode( host );
-        if ( n == null ){
-            try {
-                n = new Node( new ServerAddress( host ) );
-                _all.add( n );
-            }
-            catch ( UnknownHostException un ){
-                _logger.log( Level.WARNING , "couldn't resolve host [" + host + "]" );
-            }
-        }
-        return n;
+    Node findNode( String host ){
+        return findNode( host, _all, _logger );
     }
 
-    Node findNode( String host ){
-        for ( int i=0; i<_all.size(); i++ )
-            if ( _all.get(i)._names.contains( host ) )
-                return _all.get(i);
+    private static Node findNode( String host, List<Node> all, AtomicReference<Logger> logger ){
+        for ( int i=0; i<all.size(); i++ )
+            if ( all.get(i)._names.contains( host ) )
+                return all.get(i);
 
         ServerAddress addr = null;
         try {
             addr = new ServerAddress( host );
         }
         catch ( UnknownHostException un ){
-            _logger.log( Level.WARNING , "couldn't resolve host [" + host + "]" );
+            logger.get().log( Level.WARNING , "couldn't resolve host [" + host + "]" );
             return null;
         }
 
-        for ( int i=0; i<_all.size(); i++ ){
-            if ( _all.get(i)._addr.equals( addr ) ){
-                _all.get(i)._names.add( host );
-                return _all.get(i);
+        for ( int i=0; i<all.size(); i++ ){
+            if ( all.get(i)._addr.equals( addr ) ){
+                all.get(i)._names.add( host );
+                return all.get(i);
             }
         }
 
@@ -395,11 +556,13 @@ public class ReplicaSetStatus {
     }
 
     void close(){
-        if (!_closed) {
-            _closed = true;
-            for (int i = 0; i < _all.size(); i++) {
+        if (_closed.get()) throw new IllegalStateException("Already closed");
+
+        _closed.set(true);
+        for (int i = 0; i < _all.size(); i++) {
+            try {
                 _all.get(i).close();
-            }
+            } catch (final Throwable t) { /* nada */ }
         }
     }
 
@@ -409,18 +572,20 @@ public class ReplicaSetStatus {
      * @return the maximum size, or 0 if not obtained from servers yet.
      */
     public int getMaxBsonObjectSize() {
-        return maxBsonObjectSize;
+        return _maxBsonObjectSize.get();
     }
 
-    final List<Node> _all;
+    private final List<Node> _all;
     Updater _updater;
     Mongo _mongo;
-    String _setName = null; // null until init
-    int maxBsonObjectSize = 0;
-    Logger _logger = _rootLogger; // will get changed to use set name once its found
+    private final AtomicReference<String> _setName = new AtomicReference<String>(); // null until init
+    private final AtomicInteger _maxBsonObjectSize = new AtomicInteger(0);
 
-    String _lastPrimarySignal;
-    boolean _closed = false;
+    // will get changed to use set name once its found
+    private final AtomicReference<Logger> _logger = new AtomicReference<Logger>(_rootLogger);
+
+    private final AtomicReference<String> _lastPrimarySignal = new AtomicReference<String>();
+    private final AtomicBoolean _closed = new AtomicBoolean(false);
 
     final Random _random = new Random();
     long _nextResolveTime;
@@ -428,15 +593,18 @@ public class ReplicaSetStatus {
     static int updaterIntervalMS;
     static int slaveAcceptableLatencyMS;
     static int inetAddrCacheMS;
+    static float latencySmoothFactor;
 
-    static final MongoOptions _mongoOptions = new MongoOptions();
+    final MongoOptions _mongoOptions;
+    static final MongoOptions _mongoOptionsDefaults = new MongoOptions();
 
     static {
         updaterIntervalMS = Integer.parseInt(System.getProperty("com.mongodb.updaterIntervalMS", "5000"));
         slaveAcceptableLatencyMS = Integer.parseInt(System.getProperty("com.mongodb.slaveAcceptableLatencyMS", "15"));
         inetAddrCacheMS = Integer.parseInt(System.getProperty("com.mongodb.inetAddrCacheMS", "300000"));
-        _mongoOptions.connectTimeout = Integer.parseInt(System.getProperty("com.mongodb.updaterConnectTimeoutMS", "20000"));
-        _mongoOptions.socketTimeout = Integer.parseInt(System.getProperty("com.mongodb.updaterSocketTimeoutMS", "20000"));
+        latencySmoothFactor = Float.parseFloat(System.getProperty("com.mongodb.latencySmoothFactor", "4"));
+        _mongoOptionsDefaults.connectTimeout = Integer.parseInt(System.getProperty("com.mongodb.updaterConnectTimeoutMS", "20000"));
+        _mongoOptionsDefaults.socketTimeout = Integer.parseInt(System.getProperty("com.mongodb.updaterSocketTimeoutMS", "20000"));
     }
 
     static final DBObject _isMasterCmd = new BasicDBObject( "ismaster" , 1 );
@@ -444,8 +612,10 @@ public class ReplicaSetStatus {
     public static void main( String args[] )
         throws Exception {
         List<ServerAddress> addrs = new LinkedList<ServerAddress>();
-        addrs.add( new ServerAddress( "127.0.0.1" , 27017 ) );
         addrs.add( new ServerAddress( "127.0.0.1" , 27018 ) );
+        addrs.add( new ServerAddress( "127.0.0.1" , 27019 ) );
+        addrs.add( new ServerAddress( "127.0.0.1" , 27020 ) );
+        addrs.add( new ServerAddress( "127.0.0.1" , 27021 ) );
 
         Mongo m = new Mongo( addrs );
 
@@ -460,6 +630,9 @@ public class ReplicaSetStatus {
                 System.out.println( "master: " + status.getMaster() + "\t secondary: " + status.getASecondary() );
             }
             System.out.println( "-----------------------" );
+            DBObject tags = new BasicDBObject();
+            tags.put( "dc", "newyork" );
+            System.out.println( "Tagged Node: " + status.getASecondary( tags ) );
             Thread.sleep( 5000 );
         }
 
